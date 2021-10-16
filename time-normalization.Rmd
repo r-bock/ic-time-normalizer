@@ -1,13 +1,206 @@
 ---
-title: "time-normalization"
+title: "Time normalization for IntelliCages"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
 author: "Roland Bock"
 date: "10/15/2021"
-output: html_document
+output: 
+  html_document:
+    fig_caption: yes
+    highlight: tango
+    theme: simplex
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+## setup the column specification for the different data files to ensure consistency
+
 ```
+
+## Problem
+
+The [IntelliCages][1] by [TSE-systems][2] provide an automated system of group-housed mouse behavior over long periods of time, only interrupted by required cage changes. If one of the desired analysis is the drinking behavior over time, it is desirable to express the time in relation to the light-dark cycle. In many cases, this can be simply achieved by relabeling the time axis according to the light-dark cycle. In other cases, as in the one that prompted this solution, it is not quite as straight forward. In this example, the recording went through the time shift from standard time to daylight savings time, i.e. the light-dark cycle within the facility did not change, but the computer automatically (per default) adjusted it's own time to the daylight savings time. Although nothing changed for the individual mouse, a histogram on the visit or nosepoke times will show a time shift. 
+
+## Prerequisite
+
+This is not an explanation of the full functionality of the Intellicages. The example data for this solution are exported text files from the IntelliCage Analyzer Program, which creates 7 or 8 distinct files, but only a subset are included here: 
+
+-  **Animal**.txt      - summary for each animal
+-  **Environment**.txt - enviroment data for temperature and illumination
+-  **Visit**.txt      - summary of the visit events
+
+For detailed explanations, please refer to the help sections on your own IntelliCage system.
+
+## Goal
+
+The goal of these steps is to recalculate each visit timestamp relative to the beginning of its dark cycle. The same procedure can be used with the nosepokes, which are not included here. 
+
+## Problem visualized
+
+To start I am going to visualize the problem. Let's start with loading some neccessary packages.
+
+```{r packages, message=FALSE, warning=FALSE}
+library(easypackages)
+packages("tidyverse", "patchwork", "kableExtra", "here", "lubridate", "plotly", 
+         "labelled", "hms", "rmdformats")
+```
+
+### Animals
+
+Next load the animal data, so that we can use the assigned groups for the visit data. This data is loaded from a separate csv file to make reassigning the groups easier.
+
+```{r load-data}
+
+subjects <- read_csv(file = here("data", "animal_overview.csv"), col_names = T,
+                       col_type = "ccccic")
+subjects$Group <- factor(subjects$Group, levels = c("control", "autokn", "idkn", "ddkn"))
+subjects$DOB <- as.Date(subjects$DOB, "%m/%d/%Y")
+subjects <- rename(subjects, Tag = RFID)
+var_label(subjects) <- list(Animal = "Mouse ID number",
+                              Sex = "Sex",
+                              DOB = "Date of birth",
+                              Tag = "Chip ID number",
+                              Cohort = "Cohort number",
+                              Group = "Experimental group")
+
+subjects %>% 
+  arrange(Group, Sex) %>% 
+  kable(caption = "Overview of experimental animals") %>% 
+  kable_classic(lightable_options = "hover", font_size = 14, full_width = F)
+```
+
+### Visits
+
+```{r}
+visits.col.spec <- cols(
+  .default = col_integer(),
+  VisitID = col_integer(),
+  VisitOrder = col_integer(),
+  Animal = col_character(),
+  Tag = col_character(),
+  Sex = col_character(),
+  Group = col_character(),
+  Module = col_character(),
+  Cage = col_integer(),
+  Corner = col_integer(),
+  CornerCondition = col_factor(), 
+  PlaceError = col_logical(),
+  SideErrors = col_double(),
+  TimeErrors = col_double(),
+  ConditionErrors = col_double(), 
+  NosepokeNumber = col_double(),
+  NosepokeDuration = col_double(),
+  LickNumber = col_double(),
+  LickDuration = col_double(),
+  LickContactTime = col_double(),
+  StartDate = col_date(),
+  StartTime = col_time(),
+  StartTimecode = col_double(),
+  EndDate = col_date(),
+  EndTime = col_time(),
+  EndTimecode = col_double(),
+  VisitDuration = col_double(),
+  Session = col_integer()
+)
+
+visitData <- read_tsv(file = here("data/Cohort 1/", "Visit.txt"), col_types = visits.col.spec)
+
+tibble(variables = ncol(visitData),
+       sessions = nlevels(as.factor(visitData$Session)),
+       start = min(visitData$StartDate),
+       end = max(visitData$EndDate),
+       visits = format(nrow(visitData), big.mark = ",", justify = "right"),
+       pokes = format(sum(visitData$NosepokeNumber), big.mark = ","),
+       licks = format(sum(visitData$LickNumber), big.mark = ",")) %>%
+  kable(caption = "Quick visit data overview") %>%
+  kable_classic(font_size = 14)
+
+```
+
+In the next step I am combining the _subject_ data frame with the _visitData_ data frame, mainly to update the grouping. 
+
+```{r}
+subjects %>% 
+  select(Tag, Group) %>%            # select only the Tag and Group column from the subjects
+  left_join(visitData %>% select(-c(Group)), by = "Tag") %>%      # join with visit data and drop the group column
+  mutate(drink = if_else(Session > 1 & (Corner == 2 | Corner == 4), "alcohol", "water")) %>% # introduce a drink label for the corners
+  filter(LickNumber > 0 & drink == "alcohol") %>% 
+
+  ggplot(aes(x = StartTime, weight = LickNumber)) +
+  geom_histogram(bins = 96) +
+  geom_rect(aes(xmin = as_hms("6:30:00"), 
+                xmax = as_hms("18:30:00"), ymin = -80, ymax = -10), 
+            color = "white", fill = "gray") +
+  geom_rect(aes(xmin = as_hms("5:30:00"), 
+                xmax = as_hms("17:30:00"), ymin = -160, ymax = -90), 
+            color = "white", fill = "darkgray") +
+  scale_x_time(name = "time (h)", 
+               breaks = seq(0, 24 * 3600, 6 * 3600), 
+               labels = seq(0, 24, 6)) +
+  theme_minimal() +
+  facet_grid(. ~ Group)
+```
+
+
+
+## Solution
+
+Luckily the IntelliCages have an build-in illumination and temperature sensor. The default setting records the illumination and temperature once a minute, but that can be changed by the user. Using the functionality of the [tidyverse][3], we can extract the start times of the dark cycle, merge them back into the visit or nosepoke data file and calculate the individual offset for each time.
+
+The data for the temperature and illumination are stored in the _environment.txt_ file. It can be loaded as follows:
+
+```{r load-env-data}
+environment.col.spec <- cols(
+  .default = col_integer(),
+  DateTime = col_datetime(),
+  Temperature = col_double(),
+  Illumination = col_integer(),
+  Cage = col_integer()
+)
+
+env <- read_tsv(file = here("data/Cohort 1/", "Environment.txt"), col_names = T,
+                         col_types = environment.col.spec) %>% 
+  mutate(date = ymd(format(DateTime, "%Y-%m-%d")),
+         time = as_hms(format(DateTime, "%H:%M:%S")))
+
+glimpse(env)
+```
+
+The recorded data should be quite the same for both cages, since they are in the same room. I am also just interested in the illumination value, so we can further drop the _Temperature_ and the _DateTime_ column.
+
+```{r reduce-env-data}
+env <- env %>% filter(Cage == 1) %>% select(Illumination, date, time)
+```
+
+This reduces the tibble to `r nrow(env)` rows and `r ncol(env)` columns. 
+
+
+
+
+
+```{r}
+mouse.col.spec <- cols(
+  .default = col_double(),
+  Animal = col_character(),
+  Tag = col_character(),
+  Sex = col_character(),
+  Group = col_character(),
+  Notes = col_logical(),
+  FirstVisitDateTime = col_datetime(format = ""),
+  LastVisitDateTime = col_datetime(format = ""))
+
+subjects <- read_tsv(here("data/Cohort 1/", "Animal.txt"), col_names = T, 
+                      col_types = mouse.col.spec)
+  
+glimpse(subjects)
+```
+
+
+
 
 ## R Markdown
 
@@ -16,7 +209,7 @@ This is an R Markdown document. Markdown is a simple formatting syntax for autho
 When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
 ```{r cars}
-summary(cars)
+
 ```
 
 ## Including Plots
@@ -28,3 +221,8 @@ plot(pressure)
 ```
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+[1]: https://www.tse-systems.com/product-details/intellicage/
+[2]: https://www.tse-systems.com/
+[3]: https://www.tidyverse.org/
