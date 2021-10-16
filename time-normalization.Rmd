@@ -6,18 +6,17 @@ knit: (function(input_file, encoding) {
  encoding=encoding,
  output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
 author: "Roland Bock"
-date: "10/15/2021"
+date: "`r format(Sys.time(), '%A %B %d, %Y')`"
 output: 
   html_document:
     fig_caption: yes
+    fig_width: 10
     highlight: tango
     theme: simplex
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
-## setup the column specification for the different data files to ensure consistency
 
 ```
 
@@ -41,11 +40,11 @@ The goal of these steps is to recalculate each visit timestamp relative to the b
 
 ## Problem visualized
 
-To start I am going to visualize the problem. Let's start with loading some neccessary packages.
+To start I am going to visualize the problem. Let's begin with loading some neccessary packages.
 
 ```{r packages, message=FALSE, warning=FALSE}
 library(easypackages)
-packages("tidyverse", "patchwork", "kableExtra", "here", "lubridate", "plotly", 
+packages("tidyverse", "patchwork", "kableExtra", "here", "lubridate", 
          "labelled", "hms", "rmdformats")
 ```
 
@@ -75,7 +74,9 @@ subjects %>%
 
 ### Visits
 
-```{r}
+Loading the _Visit.txt_ file with the summary data for each registered visit.
+
+```{r load-visits, message=FALSE, warning=FALSE}
 visits.col.spec <- cols(
   .default = col_integer(),
   VisitID = col_integer(),
@@ -117,35 +118,40 @@ tibble(variables = ncol(visitData),
        pokes = format(sum(visitData$NosepokeNumber), big.mark = ","),
        licks = format(sum(visitData$LickNumber), big.mark = ",")) %>%
   kable(caption = "Quick visit data overview") %>%
-  kable_classic(font_size = 14)
+  kable_classic(font_size = 16)
 
 ```
 
 In the next step I am combining the _subject_ data frame with the _visitData_ data frame, mainly to update the grouping. 
 
-```{r}
-subjects %>% 
+```{r g-alcohol-histogram, fig.align="center", fig.cap="Alcohol drinking pattern of 4 groups of mice during the day with a reversed light-dark cycle over the course of 6 weeks. Darkgray bar indicates recorded dark cycle during standard time, lightgray bar shows dark cycle during daylight savings time. The light cycle did not change for the mice, the computer adjusted its recording time by default."}
+visitsAll <- subjects %>% 
   select(Tag, Group) %>%            # select only the Tag and Group column from the subjects
   left_join(visitData %>% select(-c(Group)), by = "Tag") %>%      # join with visit data and drop the group column
-  mutate(drink = if_else(Session > 1 & (Corner == 2 | Corner == 4), "alcohol", "water")) %>% # introduce a drink label for the corners
+  mutate(drink = if_else(Session > 1 & (Corner == 2 | Corner == 4), "alcohol", "water")) # introduce a drink 
+                                                                                         # label for the corners
+visitsAll %>% 
   filter(LickNumber > 0 & drink == "alcohol") %>% 
 
   ggplot(aes(x = StartTime, weight = LickNumber)) +
   geom_histogram(bins = 96) +
   geom_rect(aes(xmin = as_hms("6:30:00"), 
                 xmax = as_hms("18:30:00"), ymin = -80, ymax = -10), 
-            color = "white", fill = "gray") +
+            color = "white", fill = "lightgray") +
   geom_rect(aes(xmin = as_hms("5:30:00"), 
                 xmax = as_hms("17:30:00"), ymin = -160, ymax = -90), 
             color = "white", fill = "darkgray") +
-  scale_x_time(name = "time (h)", 
+  scale_x_time(name = "time of day (h)", 
                breaks = seq(0, 24 * 3600, 6 * 3600), 
                labels = seq(0, 24, 6)) +
   theme_minimal() +
+  theme(strip.background = element_rect(color = "lightgray", fill = "lightgray"),
+        strip.text = element_text(face = "italic"),
+        panel.spacing = unit(2, "lines")) +
   facet_grid(. ~ Group)
 ```
 
-
+Ideally the recording becomes independent from the computer time and can be expressed as a relative unit from the beginning of the dark or light cycle.
 
 ## Solution
 
@@ -153,7 +159,7 @@ Luckily the IntelliCages have an build-in illumination and temperature sensor. T
 
 The data for the temperature and illumination are stored in the _environment.txt_ file. It can be loaded as follows:
 
-```{r load-env-data}
+```{r load-env-data, warning=FALSE}
 environment.col.spec <- cols(
   .default = col_integer(),
   DateTime = col_datetime(),
@@ -162,7 +168,7 @@ environment.col.spec <- cols(
   Cage = col_integer()
 )
 
-env <- read_tsv(file = here("data/Cohort 1/", "Environment.txt"), col_names = T,
+env <- read_tsv(file = here("data/Cohort 1/", "Environment.txt"),
                          col_types = environment.col.spec) %>% 
   mutate(date = ymd(format(DateTime, "%Y-%m-%d")),
          time = as_hms(format(DateTime, "%H:%M:%S")))
@@ -178,49 +184,89 @@ env <- env %>% filter(Cage == 1) %>% select(Illumination, date, time)
 
 This reduces the tibble to `r nrow(env)` rows and `r ncol(env)` columns. 
 
+### Workflow
 
+#### Find all start times of the dark cycle
 
+```{r find-start-dark}
+envDark <- env %>% 
+  mutate(Illumination = if_else(Illumination < 5, 0, 10),      # clean Illumination values and
+         IllChange = Illumination - lag(Illumination))  %>%    #    calculate the change
+  filter(IllChange < 0) %>% 
+  mutate(darkStart = time)                                     # need an extra column for start time
 
+envDark %>% 
+  slice_head(n = 5) %>% 
+  kable(caption = "First rows of new environmental data table.") %>% 
+  kable_paper(font_size = 14, full_width = F)
+```
+
+I am interested in the start of the dark cycle, though the intial start of the program is in the middle of the dark cyle. We need to find the first start of the light cycle, subtract 12 hours from it and add it to the top of the table.
 
 ```{r}
-mouse.col.spec <- cols(
-  .default = col_double(),
-  Animal = col_character(),
-  Tag = col_character(),
-  Sex = col_character(),
-  Group = col_character(),
-  Notes = col_logical(),
-  FirstVisitDateTime = col_datetime(format = ""),
-  LastVisitDateTime = col_datetime(format = ""))
+env %>% 
+  mutate(Illumination = if_else(Illumination < 5, 0, 10),      # clean Illumination values and
+         IllChange = Illumination - lag(Illumination))  %>%    #    calculate the change
+  filter(IllChange > 0) %>%               # find all the light starts
+  slice_head() %>%                        # limit to the first one
+  mutate(time = as_hms(time - 12*60*60),  # subtract 12 hours from start time
+         IllChange = -IllChange,
+         Illumination = 0,
+         darkStart = time) %>% 
+  bind_rows(., envDark) -> envDark
 
-subjects <- read_tsv(here("data/Cohort 1/", "Animal.txt"), col_names = T, 
-                      col_types = mouse.col.spec)
-  
-glimpse(subjects)
+envDark %>% 
+  slice_head(n = 5) %>% 
+  kable(caption = "Added data table with first dark cycle") %>% 
+  kable_paper(font_size = 14, full_width = F)
 ```
 
+#### Add dark cycle times to timestamps for visits
 
+Now we need to get the time stamps for the visit data and match them with the correct dark cycle start time.
 
+```{r create-visit-timestamps}
+visitsDT <- visitsAll %>% 
+  select(StartDate, StartTime) %>% 
+  rename(date = "StartDate", time = "StartTime")
 
-## R Markdown
+visitsDT <- visitsDT %>% 
+  bind_rows(envDark) %>% 
+  arrange(date, time) %>%                  # sort all data rows by date and time 
+  fill(darkStart, .direction = "down") %>% # fill the missing values
+  select(-c(Illumination, IllChange))      # columns are not needed anymore
+```
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+#### Use the dark cycle start times to adjust start times
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+```{r}
+visitsCor <- visitsAll %>% 
+  inner_join(visitsDT, by = c(StartDate = "date", StartTime = "time")) %>% 
+  mutate(dark = as_hms(StartTime - darkStart))
+```
 
-```{r cars}
+### Corrected Graph
+
+```{r g-corrected-graph, fig.align="center", fig.cap="Alcohol drinking data plotted against corrected times. Time 0 is the start of the dark cycle."}
+visitsCor %>% 
+  filter(LickNumber > 0 & drink == "alcohol") %>% 
+
+  ggplot(aes(x = dark, weight = LickNumber)) +
+  geom_histogram(bins = 96) +
+  geom_rect(aes(xmin = as_hms("0:00:00"), 
+                xmax = as_hms("12:00:00"), ymin = -80, ymax = -10), 
+            color = "white", fill = "darkgray") +
+  scale_x_time(name = "time (h)", 
+               breaks = seq(-6 * 3600, 18 * 3600, 6 * 3600), 
+               labels = seq(-6, 18, 6)) +
+  theme_minimal() +
+  theme(strip.background = element_rect(color = "lightgray", fill = "lightgray"),
+        strip.text = element_text(face = "italic"),
+        panel.spacing = unit(2, "lines")) +
+  facet_grid(. ~ Group)
 
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
-```
-
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
 
 
 [1]: https://www.tse-systems.com/product-details/intellicage/
