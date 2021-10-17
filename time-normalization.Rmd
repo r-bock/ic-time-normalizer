@@ -6,7 +6,7 @@ knit: (function(input_file, encoding) {
  encoding=encoding,
  output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
 author: "Roland Bock"
-date: "`r format(Sys.time(), '%A %B %d, %Y')`"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
 output: 
   html_document:
     fig_caption: yes
@@ -17,14 +17,13 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
 ```
 
-## Problem
+# Issue
 
-The [IntelliCages][1] by [TSE-systems][2] provide an automated system of group-housed mouse behavior over long periods of time, only interrupted by required cage changes. If one of the desired analysis is the drinking behavior over time, it is desirable to express the time in relation to the light-dark cycle. In many cases, this can be simply achieved by relabeling the time axis according to the light-dark cycle. In other cases, as in the one that prompted this solution, it is not quite as straight forward. In this example, the recording went through the time shift from standard time to daylight savings time, i.e. the light-dark cycle within the facility did not change, but the computer automatically (per default) adjusted it's own time to the daylight savings time. Although nothing changed for the individual mouse, a histogram on the visit or nosepoke times will show a time shift. 
+This page provides one solution to a very specific problem, namely realigning observations in one dataframe based on sensor information provided in another dataframe. The data set has been generated using the [IntelliCages][1] by [TSE-systems][2]. They provide an automated system of group-housed mouse behavior over long periods of time, only interrupted by required cage changes. If one of the desired analysis is the drinking behavior over time, it is desirable to express the time in relation to the light-dark cycle. In many cases, this can be simply achieved by relabeling the time axis according to the light-dark cycle. In other cases, as in the one that prompted this solution, it is not quite as straight forward. In this example, the recording went through the time shift from standard time to daylight savings time, i.e. the light-dark cycle within the facility did not change, but the computer automatically (per default) adjusted it's own time to the daylight savings time. Although nothing changed for the individual animal, a histogram on the visit or nosepoke times will show a time shift. 
 
-## Prerequisite
+# Prerequisite
 
 This is not an explanation of the full functionality of the Intellicages. The example data for this solution are exported text files from the IntelliCage Analyzer Program, which creates 7 or 8 distinct files, but only a subset are included here: 
 
@@ -34,11 +33,11 @@ This is not an explanation of the full functionality of the Intellicages. The ex
 
 For detailed explanations, please refer to the help sections on your own IntelliCage system.
 
-## Goal
+# Goal
 
-The goal of these steps is to recalculate each visit timestamp relative to the beginning of its dark cycle. The same procedure can be used with the nosepokes, which are not included here. 
+The goal of these steps is to recalculate each visit timestamp relative to the beginning of its dark cycle. The same procedure can be used for the nosepoke data, which are not included here. 
 
-## Problem visualized
+# Problem visualized
 
 To start I am going to visualize the problem. Let's begin with loading some neccessary packages.
 
@@ -48,9 +47,13 @@ packages("tidyverse", "patchwork", "kableExtra", "here", "lubridate",
          "labelled", "hms")
 ```
 
+## The data
+
+Initially the data frame needs to be constructed by combining the individual visit records with the data in the animal table, so the correct grouping can be used. Otherwise the data from the visits file could be used without any joining.
+
 ### Animals
 
-Next load the animal data, so that we can use the assigned groups for the visit data. This data is loaded from a separate csv file to make reassigning the groups easier.
+First load the animal data, so that we can use the assigned groups for the visit data. This data is loaded from a separate csv file to make reassigning the groups easier.
 
 ```{r load-data}
 
@@ -74,7 +77,7 @@ subjects %>%
 
 ### Visits
 
-Loading the _Visit.txt_ file with the summary data for each registered visit.
+Next load the _Visit.txt_ file with the summary data for each registered visit.
 
 ```{r load-visits, message=FALSE, warning=FALSE}
 visits.col.spec <- cols(
@@ -118,7 +121,7 @@ tibble(variables = ncol(visitData),
        pokes = format(sum(visitData$NosepokeNumber), big.mark = ","),
        licks = format(sum(visitData$LickNumber), big.mark = ",")) %>%
   kable(caption = "Quick visit data overview") %>%
-  kable_classic(font_size = 16)
+  kable_paper(font_size = 14)
 
 ```
 
@@ -153,9 +156,70 @@ visitsAll %>%
 
 Ideally the recording becomes independent from the computer time and can be expressed as a relative unit from the beginning of the dark or light cycle.
 
-## Solution
+# Solution
 
-Luckily the IntelliCages have an build-in illumination and temperature sensor. The default setting records the illumination and temperature once a minute, but that can be changed by the user. Using the functionality of the [tidyverse][3], we can extract the start times of the dark cycle, merge them back into the visit or nosepoke data file and calculate the individual offset for each time.
+## The easy way
+
+The quick way out is to remember when the time shift happened and to manually adjust the times and dates in the visits data table. In this case, the switch from standard time to daylight savings time happened on _3/14/2021_ at _2:00 a.m._
+
+One way is to create a datetime column by combining the start date and time and then subtract one hour from each observation after the time switch happened.
+
+```{r datetime-for-visits}
+# combine the individual data and time columns into a datetime start column for each observation
+visitsAll <- visitsAll %>% 
+  mutate(StartTStamp = make_datetime(year = year(StartDate), month = month(StartDate),
+                                     day = day(StartDate), hour = hour(StartTime),
+                                     min = minute(StartTime), sec = second(StartTime)))
+```
+
+Before we continue further, let's just have a quick peak at the distribution of observations before and after the time change.
+
+```{r t-observation-distribution}
+tibble(standard = nrow(visitsAll %>% filter(StartTStamp < ymd_hms("2021-03-14 02:00:00"))),
+       perc_standard = standard / nrow(visitsAll) * 100,
+       daylight_savings = nrow(visitsAll %>% filter(StartTStamp > ymd_hms("2021-03-14 02:00:00"))),
+       per_daylight = daylight_savings / nrow(visitsAll) * 100,
+       total = nrow(visitsAll)) %>% 
+  kable(caption = "Distribution of observations before and after time switch",
+        digits = 1, format.args = list(big.mark = ","),
+        col.names = c("standard time", "%", "daylight savings time", "%", "total")) %>% 
+  kable_paper(font_size = 14)
+```
+The `lubridate` package takes care of the correct time handling especially at the day boundaries. 
+
+```{r}
+visitsAll <- visitsAll %>% 
+  mutate(adjustedDT = if_else(StartTStamp > ymd_hms("2021-03-14 02:00:00"), 
+                              StartTStamp - hours(1), StartTStamp),
+         adjustedT = as_hms(adjustedDT))
+```
+
+The result be seen in the graph below.
+
+```{r g-corr-times-quick, fig.align="center", fig.cap="Histogram with corrected visit times."}
+visitsAll %>% 
+  filter(LickNumber > 0 & drink == "alcohol") %>% 
+
+  ggplot(aes(x = adjustedT, weight = LickNumber)) +
+  geom_histogram(bins = 96) +
+  geom_rect(aes(xmin = as_hms("5:30:00"), 
+                xmax = as_hms("17:30:00"), ymin = -90, ymax = -10), 
+            color = "white", fill = "gray") +
+  scale_x_time(name = "time of day (h)", 
+               breaks = seq(0, 24 * 3600, 6 * 3600), 
+               labels = seq(0, 24, 6)) +
+  theme_minimal() +
+  theme(strip.background = element_rect(color = "lightgray", fill = "lightgray"),
+        strip.text = element_text(face = "italic"),
+        panel.spacing = unit(2, "lines")) +
+  facet_grid(. ~ Group)
+```
+
+## The alternate way
+
+Each IntelliCage has a build-in illumination and temperature sensor. The default setting records the illumination and temperature once a minute. Using the functionality of the [tidyverse][3], we can extract the start times of the dark cycle, merge them back into the visit or nosepoke data file and calculate the individual offset for each observation.
+
+The advantage of this approach is that (1) nobody has to remember when the time shift happened, especially if the data set gets revisited at a later time and (2) have a much better alignment of the data being expressed relative to the recorded light cycle. Any unsuspected shifts or irregularities will be automatically aligned. 
 
 The data for the temperature and illumination are stored in the _environment.txt_ file. It can be loaded as follows:
 
@@ -170,8 +234,8 @@ environment.col.spec <- cols(
 
 env <- read_tsv(file = here("data/Cohort 1/", "Environment.txt"),
                          col_types = environment.col.spec) %>% 
-  mutate(date = ymd(format(DateTime, "%Y-%m-%d")),
-         time = as_hms(format(DateTime, "%H:%M:%S")))
+  mutate(date = as.Date(DateTime, "%Y-%m-%d"),               # extracting the date
+         time = as_hms(format(DateTime, "%H:%M:%S")))        #   and time in extra columns
 
 glimpse(env)
 ```
@@ -184,9 +248,9 @@ env <- env %>% filter(Cage == 1) %>% select(Illumination, date, time)
 
 This reduces the tibble to `r nrow(env)` rows and `r ncol(env)` columns.
 
-### Workflow
+### (1) Find all start times of the dark cycle
 
-#### Find all start times of the dark cycle
+Start by categorizing the Illumination value as either ON or OFF for values above or below 5. This will be specific to the calibration of each individual system. Then calculate the change to the previous value. A negative change (in this case -10) indicates the first time stamp of the dark phase.
 
 ```{r find-start-dark}
 envDark <- env %>% 
@@ -219,8 +283,7 @@ Let's remove the single outlier before we merge the start times back into the vi
 envDark <- envDark %>% filter(time < as_hms("10:00:00"))
 ```
 
-
-I am interested in the start of the dark cycle, though the intial start of the program is in the middle of the dark cyle. We need to find the first start of the light cycle, subtract 12 hours from it and add it to the top of the table.
+In this case I am interested in the start of the dark cycle, though the initial start of the program is in the middle of the dark cycle. We need to find the first start of the light cycle, subtract 12 hours from it and add it to the top of the table.
 
 ```{r corr-dark-times}
 env %>% 
@@ -236,11 +299,11 @@ env %>%
 
 envDark %>% 
   slice_head(n = 5) %>% 
-  kable(caption = "Added data table with first dark cycle") %>% 
+  kable(caption = "Data table with added first row") %>% 
   kable_paper(font_size = 14, full_width = F)
 ```
 
-#### Add dark cycle times to timestamps for visits
+### (2) Add dark cycle times to timestamps for visits
 
 Now we need to get the time stamps for the visit data and match them with the correct dark cycle start time.
 
@@ -256,7 +319,7 @@ visitsDT <- visitsDT %>%
   select(-c(Illumination, IllChange))      # columns are not needed anymore
 ```
 
-#### Use the dark cycle start times to adjust start times
+### (3) Use the dark cycle start times to adjust start times
 
 ```{r corrected-visit-times}
 visitsCor <- visitsAll %>% 
@@ -264,7 +327,9 @@ visitsCor <- visitsAll %>%
   mutate(dark = as_hms(StartTime - darkStart))
 ```
 
-### Corrected Graph
+## Corrected Graph
+
+As the following graph shows, the subtraction of the start time of the dark cycle produces negative times for all observations between midnight and the start of the dark cycle. This was done on purpose to be able to show the lead-up to the dark cycle at time 0. 
 
 ```{r g-corrected-graph, fig.align="center", fig.cap="Alcohol drinking data plotted against corrected times. Time 0 is the start of the dark cycle."}
 visitsCor %>% 
@@ -283,10 +348,9 @@ visitsCor %>%
         strip.text = element_text(face = "italic"),
         panel.spacing = unit(2, "lines")) +
   facet_grid(. ~ Group)
-
 ```
 
-As some might notice, the adjustment produces negative times for the ranges between midnight and the start of the dark cycle (assuming a constant 12 hour light on-light off cycle). If this is an unwanted effect, we can simply add the negative times to 24 hours (and subtract one day from the date) to align them to the 24 hour cycle.
+If the negative times are unwanted, they can simply be transformed back into a 24 hour cycle by adding all negative times to 24 hours (and subtract one day from the date).
 
 ```{r g-full-cycle, fig.align="center", fig.cap="Histogram with times aligned to the 24 hour cycle."}
 visitsCor %>% 
@@ -307,10 +371,11 @@ visitsCor %>%
         strip.text = element_text(face = "italic"),
         panel.spacing = unit(2, "lines")) +
   facet_grid(. ~ Group)
-
 ```
 
+Violá - all data aligned using system-intrinsic sensors. Issues and errors can be logged on the [github][4] page for this repository.
 
 [1]: https://www.tse-systems.com/product-details/intellicage/
 [2]: https://www.tse-systems.com/
 [3]: https://www.tidyverse.org/
+[4]: https://github.com/r-bock/ic-time-normalizer
