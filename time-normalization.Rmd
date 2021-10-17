@@ -12,7 +12,7 @@ output:
     fig_caption: yes
     fig_width: 10
     highlight: tango
-    theme: simplex
+    theme: paper
 ---
 
 ```{r setup, include=FALSE}
@@ -44,8 +44,8 @@ To start I am going to visualize the problem. Let's begin with loading some necc
 
 ```{r packages, message=FALSE, warning=FALSE}
 library(easypackages)
-packages("tidyverse", "patchwork", "kableExtra", "here", "lubridate", 
-         "labelled", "hms", "rmdformats")
+packages("tidyverse", "patchwork", "kableExtra", "here", "lubridate",
+         "labelled", "hms")
 ```
 
 ### Animals
@@ -57,7 +57,7 @@ Next load the animal data, so that we can use the assigned groups for the visit 
 subjects <- read_csv(file = here("data", "animal_overview.csv"), col_names = T,
                        col_type = "ccccic")
 subjects$Group <- factor(subjects$Group, levels = c("control", "autokn", "idkn", "ddkn"))
-subjects$DOB <- as.Date(subjects$DOB, "%m/%d/%Y")
+subjects$DOB <- as.Date(subjects$DOB, "%m/%d/%y")
 subjects <- rename(subjects, Tag = RFID)
 var_label(subjects) <- list(Animal = "Mouse ID number",
                               Sex = "Sex",
@@ -182,7 +182,7 @@ The recorded data should be quite the same for both cages, since they are in the
 env <- env %>% filter(Cage == 1) %>% select(Illumination, date, time)
 ```
 
-This reduces the tibble to `r nrow(env)` rows and `r ncol(env)` columns. 
+This reduces the tibble to `r nrow(env)` rows and `r ncol(env)` columns.
 
 ### Workflow
 
@@ -201,9 +201,28 @@ envDark %>%
   kable_paper(font_size = 14, full_width = F)
 ```
 
+As a good measure, lets perform quick sanity check to make sure all data points are consistent.
+
+```{r g-starttimes, fig.align="center", fig.width=3, fig.height=4, fig.cap="A single outlier of the start times indicate that somebody turned the light on during the dark cycle."}
+envDark %>% 
+  ggplot(aes(x = 1, y = darkStart)) +
+  geom_jitter(width = 0.2, shape = 19, fill = "gray", alpha = 0.5) +
+  scale_x_continuous(name = "", limits = c(0, 2)) +
+  scale_y_time(name = "start times of dark cycle",
+               limits = c(5 * 3600, 11.2 * 3600)) +
+  theme_minimal()
+```
+
+Let's remove the single outlier before we merge the start times back into the visits data frame.
+
+```{r remove-outlier}
+envDark <- envDark %>% filter(time < as_hms("10:00:00"))
+```
+
+
 I am interested in the start of the dark cycle, though the intial start of the program is in the middle of the dark cyle. We need to find the first start of the light cycle, subtract 12 hours from it and add it to the top of the table.
 
-```{r}
+```{r corr-dark-times}
 env %>% 
   mutate(Illumination = if_else(Illumination < 5, 0, 10),      # clean Illumination values and
          IllChange = Illumination - lag(Illumination))  %>%    #    calculate the change
@@ -239,7 +258,7 @@ visitsDT <- visitsDT %>%
 
 #### Use the dark cycle start times to adjust start times
 
-```{r}
+```{r corrected-visit-times}
 visitsCor <- visitsAll %>% 
   inner_join(visitsDT, by = c(StartDate = "date", StartTime = "time")) %>% 
   mutate(dark = as_hms(StartTime - darkStart))
@@ -267,6 +286,29 @@ visitsCor %>%
 
 ```
 
+As some might notice, the adjustment produces negative times for the ranges between midnight and the start of the dark cycle (assuming a constant 12 hour light on-light off cycle). If this is an unwanted effect, we can simply add the negative times to 24 hours (and subtract one day from the date) to align them to the 24 hour cycle.
+
+```{r g-full-cycle, fig.align="center", fig.cap="Histogram with times aligned to the 24 hour cycle."}
+visitsCor %>% 
+  mutate(dark_d = if_else(dark < 0, StartDate - 1, StartDate),
+         dark_t = if_else(dark < 0, as_hms(24 * 3600 + dark), dark)) %>% 
+  filter(LickNumber > 0 & drink == "alcohol") %>% 
+
+  ggplot(aes(x = dark_t, weight = LickNumber)) +
+  geom_histogram(bins = 96) +
+  geom_rect(aes(xmin = as_hms("0:00:00"), 
+                xmax = as_hms("12:00:00"), ymin = -80, ymax = -10), 
+            color = "white", fill = "darkgray") +
+  scale_x_time(name = "time (h)", 
+               breaks = seq(0, 24 * 3600, 6 * 3600), 
+               labels = seq(0, 24, 6)) +
+  theme_minimal() +
+  theme(strip.background = element_rect(color = "lightgray", fill = "lightgray"),
+        strip.text = element_text(face = "italic"),
+        panel.spacing = unit(2, "lines")) +
+  facet_grid(. ~ Group)
+
+```
 
 
 [1]: https://www.tse-systems.com/product-details/intellicage/
